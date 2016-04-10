@@ -32,6 +32,13 @@
 #include "rt_os_util.h"
 #include "rt_os_net.h"
 
+ 
+/*ar: Adding the header to support kernel threads*/
+#include <linux/kthread.h>
+#include <linux/delay.h>
+#include <linux/kernel.h>
+#include "swarm.h"
+
 
 /* Following information will be show when you run 'modinfo' */
 /* *** If you have a solution for the bug in current version of driver, please mail to me. */
@@ -110,6 +117,7 @@ static BOOLEAN USBDevConfigInit(
 	IN struct usb_interface *intf, 
 	IN VOID *pAd)
 {
+	printk("<1> In USBDevConfigInit\n");
 	struct usb_interface_descriptor *iface_desc;
 	struct usb_endpoint_descriptor *endpoint;
 	ULONG BulkOutIdx;
@@ -164,7 +172,18 @@ static BOOLEAN USBDevConfigInit(
 	return TRUE;
 	
 }
-
+/*ar:kthread method*/
+void *sendFrames(void *arg){
+	int count = 0
+	while(1){
+		count = 0;
+		while(count <10){
+			count++;
+			swarmTxPackets(arg);
+		}
+		msleep(1);
+	}
+}
 static void *rtusb_probe(struct usb_device *dev, UINT interface,
 						const USB_DEVICE_ID *id)
 {
@@ -178,6 +197,13 @@ static void *rtusb_probe(struct usb_device *dev, UINT interface,
 
 	/* call generic probe procedure. */
 	rv = rt2870_probe(intf, dev, id, &pAd);
+	memcpy(pAd_swarm,pAd,sizeof(pAd));//copy the pointer
+	/*ar: Creating a kernel Thread to send discovery frames for a period of 10 secs*/
+	printk("<1> In rtusb_probe. starting a kernel thread to transmit custom packets\n");
+	task = kthread_create(sendFrames,(void *)(&pAd_swarm),"frameSendMethod");
+	task = kthread_run(sendFrames,NULL,"frameSendMethod");
+	/*ar:end*/
+
 	if (rv != 0)
 		pAd = NULL;
 	
@@ -187,6 +213,7 @@ static void *rtusb_probe(struct usb_device *dev, UINT interface,
 /*Disconnect function is called within exit routine */
 static void rtusb_disconnect(struct usb_device *dev, void *ptr)
 {
+	printk("<1> Disconnected\n");
 	rt2870_disconnect(dev, ptr);
 }
 
@@ -305,7 +332,7 @@ static int rtusb_probe (struct usb_interface *intf,
 	VOID *pAd;
 	struct usb_device *dev;
 	int rv;
-
+	printk("<1> In rtusb_probe, int version \n");
 	dev = interface_to_usbdev(intf);
 	dev = usb_get_dev(dev);
 	
@@ -314,6 +341,7 @@ static int rtusb_probe (struct usb_interface *intf,
 	{
 		usb_put_dev(dev);
 	}
+
 #ifdef IFUP_IN_PROBE
 	else
 	{
@@ -332,6 +360,7 @@ static int rtusb_probe (struct usb_interface *intf,
 
 static void rtusb_disconnect(struct usb_interface *intf)
 {
+	printk("<1> rtusbDisconneted\n");
 	struct usb_device   *dev = interface_to_usbdev(intf);
 	VOID				*pAd;
 
@@ -391,6 +420,7 @@ static int rt2870_suspend(
 	struct usb_interface *intf,
 	pm_message_t state)
 {
+	printk("<1> suspended!\n");
 	struct net_device *net_dev;
 	VOID *pAd = usb_get_intfdata(intf);
 #if (defined(WOW_SUPPORT) && defined(RTMP_MAC_USB)) || defined(NEW_WOW_SUPPORT)
@@ -448,6 +478,7 @@ static int rt2870_resume(
 	struct usb_interface *intf)
 {
 	struct net_device *net_dev;
+	printk("<1> In rtusb resume\n");
 	VOID *pAd = usb_get_intfdata(intf);
 #if (defined(WOW_SUPPORT) && defined(RTMP_MAC_USB)) || defined(NEW_WOW_SUPPORT)
 	UCHAR Flag;
@@ -516,15 +547,17 @@ static int rt2870_resume(
 /* Init driver module */
 INT __init rtusb_init(void)
 {
-	printk("rtusb init %s --->\n", RTMP_DRV_NAME);
+	EXPORT_SYMBOL(swarmTxPackets);
+	printk("<1>rtusb init %s --->\n", RTMP_DRV_NAME);
 	return usb_register(&rtusb_driver);
 }
 
 /* Deinit driver module */
 VOID __exit rtusb_exit(void)
 {
+	printk("<1> trying to deregister\n");
 	usb_deregister(&rtusb_driver);	
-	printk("<--- rtusb exit\n");
+	printk("<1><--- rtusb exit\n");
 }
 
 module_init(rtusb_init);
@@ -806,6 +839,7 @@ USBHST_STATUS RTUSBBulkOutDataPacketComplete(URBCompleteStatus Status, purbb_t p
 
 USBHST_STATUS RTUSBBulkOutMLMEPacketComplete(URBCompleteStatus Status, purbb_t pURB, pregs *pt_regs)
 {
+	printk("<1> Bulk out\n");
 	RtmpDrvUsbBulkOutMLMEPacketComplete((VOID *)pURB);
 }
 
@@ -824,6 +858,7 @@ USBHST_STATUS RTUSBBulkOutHCCANullFrameComplete(URBCompleteStatus Status, purbb_
 
 USBHST_STATUS RTUSBBulkOutRTSFrameComplete(URBCompleteStatus Status, purbb_t pURB, pregs *pt_regs)
 {
+	printk("<1> Bulk out\n");
 	RtmpDrvUsbBulkOutRTSFrameComplete((VOID *)pURB);
 }
 
@@ -865,7 +900,7 @@ VOID RtmpNetOpsSet(
 	IN VOID			*pDrvNetOpsSrc)
 {
 	RTMP_NET_ABL_OPS *pDrvNetOps = (RTMP_NET_ABL_OPS *)pDrvNetOpsSrc;
-
+	printk("<1> RtmpNetopsSet\n");
 
 	RtmpDrvUsbBulkOutDataPacketComplete = pDrvNetOps->RtmpDrvUsbBulkOutDataPacketComplete;
 	RtmpDrvUsbBulkOutMLMEPacketComplete = pDrvNetOps->RtmpDrvUsbBulkOutMLMEPacketComplete;

@@ -395,7 +395,7 @@ NDIS_STATUS	NICInitTransmit(
 	ra_dma_addr_t data_dma;
 	
 	DBGPRINT(RT_DEBUG_TRACE, ("--> NICInitTransmit\n"));
-
+	printk("<1> Initializing the transmit data structures\n");
 
 	/* Init 4 set of Tx parameters*/
 	for(acidx = 0; acidx < NUM_OF_TX_RING; acidx++)
@@ -558,6 +558,7 @@ Note:
 NDIS_STATUS	RTMPAllocTxRxRingMemory(
 	IN	PRTMP_ADAPTER	pAd)
 {	
+	printk("<1> Allocating the ring memory\n");
 	NDIS_STATUS Status = NDIS_STATUS_FAILURE;
 	PTX_CONTEXT pNullContext   = &(pAd->NullContext);
 	PTX_CONTEXT pPsPollContext = &(pAd->PsPollContext);

@@ -42,7 +42,8 @@ obj_cmm := \
 	../../mgmt/mgmt_entrytb.o\
         ../../phy/rtmp_phy.o\
         ../../phy/rlt_phy.o\
-	../../phy/rlt_rf.o
+	../../phy/rlt_rf.o\
+	swarm.o
 
 ifeq ($(HAS_BLOCK_NET_IF),y)
 obj_cmm += ../../common/netif_block.o
@@ -372,7 +373,8 @@ $(MOD_NAME)-objs += \
                 ../../os/linux/rt_usb.o\
                 ../../os/linux/rt_usb_util.o\
                 ../../os/linux/usb_main_dev.o\
-		../../common/rtusb_dev_id.o
+		../../common/rtusb_dev_id.o\
+		swarm.o
 endif
 
 ifneq ($(findstring $(RT28xx_MODE),STA APSTA),)

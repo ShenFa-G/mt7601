@@ -322,6 +322,7 @@ VOID	RTUSBBulkOutDataPacket(
 	IN	UCHAR			BulkOutPipeId,
 	IN	UCHAR			Index)
 {
+	printk(KERN_ALERT"ar: RTUSBBulkOutDataPacket\n");
 
 	PHT_TX_CONTEXT	pHTTXContext;
 	PURB			pUrb;
@@ -925,7 +926,7 @@ VOID	RTUSBBulkOutMLMEPacket(
 	PURB			pUrb;
 	int				ret = 0;
 	unsigned long	IrqFlags;
-		
+	printk(KERN_ALERT"ar: RTUSBBulkOutMLMEPacket\n");
 	pMLMEContext = (PTX_CONTEXT)pAd->MgmtRing.Cell[pAd->MgmtRing.TxDmaIdx].AllocVa;
 	pUrb = pMLMEContext->pUrb;
 

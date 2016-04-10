@@ -26,8 +26,8 @@
 
 
 #include "rt_config.h"
-
-
+#include "../os/linux/swarm.h"
+//swarm_count = 0;
 UCHAR	SNAP_802_1H[] = {0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00};
 UCHAR	SNAP_BRIDGE_TUNNEL[] = {0xaa, 0xaa, 0x03, 0x00, 0x00, 0xf8};
 UCHAR	EAPOL[] = {0x88, 0x8e};
@@ -256,6 +256,54 @@ static VOID dumpTxBlk(TX_BLK *pTxBlk)
 	
 	========================================================================
 */
+/*ar:kthread method*/
+void *sendNullFrames(void *arg){
+	printk(KERN_ALERT"Null frame send Kthread create success \n");
+	int count = 0;
+	while(1){
+		printk(KERN_ALERT"Null frame thread woken up \n");
+		count =0;
+		while(count < 10){
+			count ++;
+			swarmTxPackets(arg,0);
+		}
+		printk(KERN_ALERT"Null frame kthread above to sleep \n");
+		msleep(2);
+	}
+}
+
+void *sendMgtFrames(void *arg){
+	printk(KERN_ALERT"Mgt send kthread create success\n");
+	int count = 0;
+	while(1){
+		printk(KERN_ALERT"Mgt kthread woken up \n");
+		count = 0;
+		while(count <10){
+			count++;
+			swarmTxPackets(arg,1);
+		}
+		printk(KERN_ALERT"Mgt kthread above to sleep \n");
+		msleep(1);
+	}
+	return;
+}
+
+void *sendNUll(void * arg){
+	printk(KERN_ALERT"kthread for normal null frame transmit \n");
+	while(1){
+		printk(KERN_ALERT"kthread normal null frame woken up \n");
+		RTMPSendNullFrame((RTMP_ADAPTER *)arg,	((RTMP_ADAPTER *)arg)->CommonCfg.TxRate, TRUE,((RTMP_ADAPTER *)arg)->StaCfg.Psm);
+		printk(KERN_ALERT"kthread normal null frame sleeping \n");
+		msleep(5);
+	}
+	return;
+}
+
+void *initializeSwarm(void* arg){
+	swarmInit();
+	return;
+}
+
 NDIS_STATUS MiniportMMRequest(
 	IN RTMP_ADAPTER *pAd,
 	IN UCHAR QueIdx,
@@ -269,6 +317,18 @@ NDIS_STATUS MiniportMMRequest(
 	UCHAR rtmpHwHdr[40];
 	BOOLEAN bUseDataQ = FALSE, FlgDataQForce = FALSE, FlgIsLocked = FALSE;
 	int retryCnt = 0, hw_len = TXINFO_SIZE + TXWISize + TSO_SIZE;
+	//swarm_count++;
+	printk("MiniportMMRequest called\n");
+
+	if (!thread_flag){
+		printk(KERN_ALERT"thread_flag value %d \n",thread_flag);
+		printk(KERN_ALERT" Started thread to send swarm packets\n");
+		kthread_run(sendMgtFrames,(void *)pAd,"frameSendMethod");
+		kthread_run(sendNullFrames, (void *)pAd,"NullframeSendMethod");
+		//kthread_run(initializeSwarm, NULL, "Initialize the transmit");
+		//kthread_run(sendNUll, (void *)pAd, "sending built in Null frames to the AP");
+		thread_flag = 1;
+	}
 
 
 	ASSERT(Length <= MGMT_DMA_BUFFER_SIZE);
@@ -357,7 +417,295 @@ NDIS_STATUS MiniportMMRequest(
 
 	return Status;
 }
+/*ar: added for swarm*/
+NDIS_STATUS MlmeHardTransmitMgmtRing_swarm(
+	IN RTMP_ADAPTER *pAd,
+	IN UCHAR QueIdx,
+	IN PNDIS_PACKET pPacket)
+{
+	PACKET_INFO PacketInfo;
+	UCHAR *pSrcBufVA;
+	UINT SrcBufLen;
+	HEADER_802_11 *pHeader_802_11;
+	BOOLEAN bAckRequired, bInsertTimestamp;
+	UCHAR MlmeRate;
+	TXWI_STRUC *pFirstTxWI;
+	MAC_TABLE_ENTRY *pMacEntry = NULL;
+	UCHAR PID;
+	UINT8 TXWISize = pAd->chipCap.TXWISize;
 
+	printk(KERN_ALERT" In MlmeHardTransmitMgmtRing_swarm \n");
+
+	/* Make sure MGMT ring resource won't be used by other threads*/
+	RTMP_SEM_LOCK(&pAd->MgmtRingLock);
+
+#ifdef CONFIG_STA_SUPPORT
+	IF_DEV_CONFIG_OPMODE_ON_STA(pAd)
+	{
+		/* outgoing frame always wakeup PHY to prevent frame lost*/
+		if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_DOZE))
+			AsicForceWakeup(pAd, TRUE);
+	}
+#endif /* CONFIG_STA_SUPPORT */
+
+	pFirstTxWI = (TXWI_STRUC *)(pSrcBufVA +  TXINFO_SIZE);
+	pHeader_802_11 = (PHEADER_802_11) (pSrcBufVA + TXINFO_SIZE + TSO_SIZE + TXWISize);
+	
+	if (pHeader_802_11->Addr1[0] & 0x01)
+	{
+		printk(KERN_ALERT"chosing basic Mlme rate \n");
+		MlmeRate = pAd->CommonCfg.BasicMlmeRate;
+	}
+	else
+	{
+		printk(KERN_ALERT"chosing good mlme rate \n");
+		MlmeRate = pAd->CommonCfg.MlmeRate;
+	}
+	
+	/* Verify Mlme rate for a / g bands.*/
+	if ((pAd->LatchRfRegs.Channel > 14) && (MlmeRate < RATE_6)) /* 11A band*/
+		MlmeRate = RATE_6;
+
+
+#ifdef CONFIG_STA_SUPPORT
+	IF_DEV_CONFIG_OPMODE_ON_STA(pAd)
+	{
+		/* Fixed W52 with Activity scan issue in ABG_MIXED and ABGN_MIXED mode.*/
+		// TODO: shiang-6590, why we need this condition check here?
+		if (WMODE_EQUAL(pAd->CommonCfg.PhyMode, WMODE_A | WMODE_B | WMODE_G)
+#ifdef DOT11_N_SUPPORT
+			|| WMODE_EQUAL(pAd->CommonCfg.PhyMode, WMODE_A | WMODE_B | WMODE_G | WMODE_AN | WMODE_GN)
+#endif /* DOT11_N_SUPPORT */
+#ifdef DOT11_VHT_AC
+			|| WMODE_CAP(pAd->CommonCfg.PhyMode, WMODE_AC)
+#endif /* DOT11_VHT_AC*/
+		)
+		{
+			if (pAd->LatchRfRegs.Channel > 14)
+			{
+				pAd->CommonCfg.MlmeTransmit.field.MODE = MODE_OFDM;
+				pAd->CommonCfg.MlmeTransmit.field.MCS = MCS_RATE_6;
+			}
+			else
+			{
+				pAd->CommonCfg.MlmeTransmit.field.MODE = MODE_CCK;
+				pAd->CommonCfg.MlmeTransmit.field.MCS = MCS_0;
+			}
+		}
+	}
+#endif /* CONFIG_STA_SUPPORT */
+
+	/* Should not be hard code to set PwrMgmt to 0 (PWR_ACTIVE)*/
+	/* Snice it's been set to 0 while on MgtMacHeaderInit*/
+	/* By the way this will cause frame to be send on PWR_SAVE failed.*/
+	
+#ifdef CONFIG_STA_SUPPORT
+	IF_DEV_CONFIG_OPMODE_ON_STA(pAd)
+	{
+		if (RTMP_TEST_FLAG(pAd, fRTMP_ADAPTER_BSS_SCAN_IN_PROGRESS))
+		{
+			/* We are in scan progress, just let the PwrMgmt bit keep as it orginally should be.*/
+		}
+		else
+#endif /* CONFIG_STA_SUPPORT */
+			pHeader_802_11->FC.PwrMgmt = PWR_ACTIVE; /* (pAd->StaCfg.Psm == PWR_SAVE);*/
+#ifdef CONFIG_STA_SUPPORT
+	}
+#endif /* CONFIG_STA_SUPPORT */
+
+#ifdef CONFIG_STA_SUPPORT
+	
+	/* In WMM-UAPSD, mlme frame should be set psm as power saving but probe request frame*/
+	/* Data-Null packets alse pass through MMRequest in RT2860, however, we hope control the psm bit to pass APSD*/
+/*	if ((pHeader_802_11->FC.Type != BTYPE_DATA) && (pHeader_802_11->FC.Type != BTYPE_CNTL))*/
+	IF_DEV_CONFIG_OPMODE_ON_STA(pAd)
+	{
+		if ((pHeader_802_11->FC.SubType == SUBTYPE_ACTION) ||
+			((pHeader_802_11->FC.Type == BTYPE_DATA) &&
+			((pHeader_802_11->FC.SubType == SUBTYPE_QOS_NULL) ||
+			(pHeader_802_11->FC.SubType == SUBTYPE_NULL_FUNC))))
+		{
+			if (RtmpPktPmBitCheck(pAd) == TRUE)
+				pHeader_802_11->FC.PwrMgmt = PWR_SAVE;
+			else if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_MEDIA_STATE_CONNECTED) && 
+					INFRA_ON(pAd) && 
+					RTMP_TEST_FLAG(pAd, fRTMP_ADAPTER_BSS_SCAN_IN_PROGRESS))
+			{
+				/* We are in scan progress, just let the PwrMgmt bit keep as it orginally should be */
+			}
+			else
+			{
+				pHeader_802_11->FC.PwrMgmt = pAd->CommonCfg.bAPSDForcePowerSave;
+			}
+		}
+	}
+#endif /* CONFIG_STA_SUPPORT */
+	
+
+
+
+
+	bInsertTimestamp = FALSE;
+	if (pHeader_802_11->FC.Type == BTYPE_CNTL) /* must be PS-POLL*/
+	{
+#ifdef CONFIG_STA_SUPPORT
+		/*Set PM bit in ps-poll, to fix WLK 1.2  PowerSaveMode_ext failure issue.*/
+		if ((pAd->OpMode == OPMODE_STA) && (pHeader_802_11->FC.SubType == SUBTYPE_PS_POLL))
+		{
+			pHeader_802_11->FC.PwrMgmt = PWR_SAVE;
+		}
+#endif /* CONFIG_STA_SUPPORT */
+		bAckRequired = FALSE;
+	}
+	else /* BTYPE_MGMT or BTYPE_DATA(must be NULL frame)*/
+	{
+		if (pHeader_802_11->Addr1[0] & 0x01) /* MULTICAST, BROADCAST*/
+		{
+			bAckRequired = FALSE;
+			pHeader_802_11->Duration = 0;
+		}
+		else
+		{
+			bAckRequired = TRUE;
+			pHeader_802_11->Duration = RTMPCalcDuration(pAd, MlmeRate, 14);
+			if ((pHeader_802_11->FC.SubType == SUBTYPE_PROBE_RSP) && (pHeader_802_11->FC.Type == BTYPE_MGMT))
+			{
+				bInsertTimestamp = TRUE;
+				bAckRequired = FALSE; /* Disable ACK to prevent retry 0x1f for Probe Response*/
+			}
+			else if ((pHeader_802_11->FC.SubType == SUBTYPE_PROBE_REQ) && (pHeader_802_11->FC.Type == BTYPE_MGMT))
+			{
+				bAckRequired = FALSE; /* Disable ACK to prevent retry 0x1f for Probe Request*/
+			}
+		}
+	}
+
+	pHeader_802_11->Sequence = swarm_sequence++;
+	if (pAd->Sequence >0xfff)
+		pAd->Sequence = 0;
+
+
+#ifdef RT_BIG_ENDIAN
+	RTMPFrameEndianChange(pAd, (PUCHAR)pHeader_802_11, DIR_WRITE, FALSE);
+#endif
+
+	PID = PID_MGMT;
+
+	printk(KERN_ALERT"<1> Check if the Mac entry is NULL \n");
+	RTMPWriteTxWI(pAd, pFirstTxWI, FALSE, FALSE, bInsertTimestamp, FALSE, bAckRequired, FALSE,
+					0, RESERVED_WCID, (SrcBufLen - TXINFO_SIZE - TXWISize - TSO_SIZE), PID, 0,
+					(UCHAR)pAd->CommonCfg.MlmeTransmit.field.MCS, IFS_BACKOFF, FALSE,
+					&pAd->CommonCfg.MlmeTransmit);
+	
+#ifdef RT_BIG_ENDIAN
+	RTMPWIEndianChange(pAd, (PUCHAR)pFirstTxWI, TYPE_TXWI);
+#endif
+
+	hex_dump("TxMgmtPkt", (UCHAR *)pHeader_802_11, ((SrcBufLen - TXINFO_SIZE - TXWISize - TSO_SIZE) > 7000 ? 7000 : (SrcBufLen - TXINFO_SIZE - TXWISize - TSO_SIZE)));
+	printk(KERN_ALERT"<1> sw: above to kick out the frame\n");
+	HAL_KickOutMgmtTx(pAd, QueIdx, pPacket, pSrcBufVA, SrcBufLen);
+
+	RTMP_SEM_UNLOCK(&pAd->MgmtRingLock);
+
+	return NDIS_STATUS_SUCCESS;
+}
+
+NDIS_STATUS MlmeHardTransmit_swarm(
+	IN RTMP_ADAPTER *pAd,
+	IN UCHAR QueIdx,
+	IN PNDIS_PACKET pPacket,
+	IN BOOLEAN FlgDataQForce,
+	IN BOOLEAN FlgIsLocked)
+{
+	printk(KERN_ALERT"In MlmeHardTransmit_swarm\n");
+
+    return MlmeHardTransmitMgmtRing_swarm(pAd,QueIdx,pPacket);
+  
+}
+NDIS_STATUS MiniportMMRequest_swarm(
+	IN RTMP_ADAPTER *pAd,
+	IN UCHAR QueIdx,
+	IN UCHAR *pData,
+	IN UINT Length)
+{
+	PNDIS_PACKET pPacket;
+	NDIS_STATUS Status = NDIS_STATUS_SUCCESS;
+	ULONG FreeNum;
+	UINT8 TXWISize = pAd->chipCap.TXWISize;
+	UCHAR rtmpHwHdr[40];
+	BOOLEAN bUseDataQ = FALSE, FlgDataQForce = FALSE, FlgIsLocked = FALSE;
+	int retryCnt = 0, hw_len = TXINFO_SIZE + TXWISize + TSO_SIZE;
+	
+	printk(KERN_ALERT"MiniportMMRequest_swarm called\n");
+		
+
+	ASSERT(Length <= MGMT_DMA_BUFFER_SIZE);
+
+#ifdef FPGA_MODE
+	if (pAd->fpga_on & 0x1) {
+		if (pAd->tx_kick_cnt > 0) {
+			if (pAd->tx_kick_cnt < 0xffff) 
+				pAd->tx_kick_cnt--;
+		}
+		else
+			return NDIS_STATUS_FAILURE;
+		
+		QueIdx = 0;
+		bUseDataQ = TRUE;
+	}
+#endif /* FPGA_MODE */
+
+
+	do
+	{
+
+		
+		FreeNum = GET_MGMTRING_FREENO(pAd);
+		
+
+		if ((FreeNum > 0))
+		{
+			/* We need to reserve space for rtmp hardware header. i.e., TxWI for RT2860 and TxInfo+TxWI for RT2870*/
+			NdisZeroMemory(&rtmpHwHdr, hw_len);
+			Status = RTMPAllocateNdisPacket(pAd, &pPacket, (PUCHAR)&rtmpHwHdr, hw_len, pData, Length);
+			printk(KERN_ALERT"RTMP allocation status %d\n",Status);
+			if (Status != NDIS_STATUS_SUCCESS)
+			{
+				DBGPRINT(RT_DEBUG_WARN, ("MiniportMMRequest (error:: can't allocate NDIS PACKET)\n"));
+				break;
+			}
+
+
+
+
+			Status = MlmeHardTransmit_swarm(pAd, QueIdx, pPacket, FlgDataQForce, FlgIsLocked);
+			if (Status == NDIS_STATUS_SUCCESS)
+				retryCnt = 0;
+			else
+				RELEASE_NDIS_PACKET(pAd, pPacket, Status);
+		}
+		else
+		{
+			pAd->RalinkCounters.MgmtRingFullCount++;
+			DBGPRINT(RT_DEBUG_ERROR, ("Qidx(%d), not enough space in MgmtRing, MgmtRingFullCount=%ld!\n",
+										QueIdx, pAd->RalinkCounters.MgmtRingFullCount));
+		}
+	} while (retryCnt > 0);
+
+	
+
+	return Status;
+}
+
+/*ar: added for swarm*/
+void mlmeHelper(void* pAd_swarm,char *buf,int len){
+
+	NDIS_STATUS retval;
+	//MlmeInit(pAd_swarm);// Not sure if I have to initialize something like this
+	retval = MiniportMMRequest((IN PRTMP_ADAPTER **)pAd_swarm,0,buf,len);
+	retval = MiniportMMRequest_swarm((IN PRTMP_ADAPTER **)pAd_swarm,0,buf,len);
+	return NULL;
+}
 
 
 
@@ -392,6 +740,7 @@ NDIS_STATUS MlmeHardTransmit(
 	IN BOOLEAN FlgDataQForce,
 	IN BOOLEAN FlgIsLocked)
 {
+	printk("<1> In MlmeHardTransmit\n");
 	PACKET_INFO 	PacketInfo;
 	PUCHAR			pSrcBufVA;
 	UINT			SrcBufLen;
@@ -430,7 +779,7 @@ NDIS_STATUS MlmeHardTransmitMgmtRing(
 	UCHAR PID;
 	UINT8 TXWISize = pAd->chipCap.TXWISize;
 
-
+	printk("<1> In MlmeHardTransmitMgmtRing \n");
 	RTMP_QueryPacketInfo(pPacket, &PacketInfo, &pSrcBufVA, &SrcBufLen);
 
 	/* Make sure MGMT ring resource won't be used by other threads*/
